@@ -61,8 +61,8 @@ const SYSTEM_MOD_PATTERNS = [
  */
 function extractPathsFromCommand(cmd: string): string[] {
   const paths: string[] = [];
-  // Match absolute paths — full path from / to end of token (not just segments containing /)
-  const absoluteMatches = cmd.match(/\/[^\s"'`)]+/g);
+  // Match absolute paths — / must be at start of string or after whitespace/quote (not after . or word chars)
+  const absoluteMatches = cmd.match(/(?:^|(?<=[\s"'`(]))\/[^\s"'`)]+/g);
   if (absoluteMatches) paths.push(...absoluteMatches);
   // Match relative paths with ../ (potential workspace escape)
   const relativeMatches = cmd.match(/\.\.\/[^\s"'`)]+/g);
