@@ -5,6 +5,9 @@
   "keywords": [
     "pi-package"
   ],
+  "scripts": {
+    "test": "pi -ne -ns -e ./extensions/pi-workspace-gate"
+  },
   "license": "MIT",
   "repository": {
     "type": "git",
