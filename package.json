@@ -1,0 +1,18 @@
+{
+  "name": "pi-workspace-gate",
+  "version": "0.0.1",
+  "description": "Security gate for pi — blocks dangerous commands, sensitive file access, and paths outside the workspace",
+  "keywords": [
+    "pi-package"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/goga-m/pi-workspace-gate"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  }
+}
