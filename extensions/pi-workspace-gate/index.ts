@@ -2,7 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 import { resolve, toNamespacedPath, sep } from "node:path";
 import { realpathSync } from "node:fs";
-import { platform } from "node:os";
+import { platform, homedir } from "node:os";
 
 const FILE_TOOLS = ["read", "write", "edit", "grep", "find", "ls"] as const;
 
@@ -58,14 +58,32 @@ const SYSTEM_MOD_PATTERNS = [
 ];
 
 /**
+ * Expand leading ~/ or ~\ to the user's home directory.
+ */
+function expandTilde(path: string): string {
+  const home = homedir();
+  if (path === "~") {
+    return home;
+  } else if (path.startsWith("~/") || path.startsWith("~\\")) {
+    return home + path.slice(1);
+  }
+  return path;
+}
+
+/**
  * Extract file paths from a bash command.
- * Matches absolute paths (/...) and relative paths with ../ that escape the workspace.
+ * Matches absolute paths (/...), tilde paths (~/...), and relative paths with ../ that escape the workspace.
  */
 function extractPathsFromCommand(cmd: string): string[] {
   const paths: string[] = [];
   // Match absolute paths — / must be at start of string or after whitespace/quote (not after . or word chars)
   const absoluteMatches = cmd.match(/(?:^|(?<=[\s"'`(]))\/[^\s"'`)]+/g);
   if (absoluteMatches) paths.push(...absoluteMatches);
+  // Match tilde paths (~...)
+  const tildeMatches = cmd.match(/~\\?[^\s"'`)]+/g);
+  if (tildeMatches) {
+    paths.push(...tildeMatches.map(expandTilde));
+  }
   // Match relative paths with ../ (potential workspace escape)
   const relativeMatches = cmd.match(/\.\.\/[^\s"'`)]+/g);
   if (relativeMatches) paths.push(...relativeMatches);
@@ -194,8 +212,11 @@ export default function (pi: ExtensionAPI) {
 
     if (!targetPath) return;
 
+    // Expand ~ before resolving
+    const expandedTarget = expandTilde(targetPath);
+
     // Resolve relative paths against cwd, then follow symlinks
-    const absolute = resolve(ctx.cwd, targetPath);
+    const absolute = resolve(ctx.cwd, expandedTarget);
     let real: string;
     try {
       real = realpathSync(absolute);
