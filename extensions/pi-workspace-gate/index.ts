@@ -1,11 +1,13 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
-import { resolve, toNamespacedPath } from "node:path";
+import { resolve, toNamespacedPath, sep } from "node:path";
 import { realpathSync } from "node:fs";
+import { platform, homedir } from "node:os";
 
 const FILE_TOOLS = ["read", "write", "edit", "grep", "find", "ls"] as const;
 
 // Files that always require confirmation, regardless of location
+// Use [\\/] to match both forward and backward slashes on all platforms
 const SENSITIVE_PATTERNS = [
   /\.env$/i,
   /\.npmrc$/i,
@@ -13,10 +15,10 @@ const SENSITIVE_PATTERNS = [
   /\.netrc$/i,
   /id_rsa$/i,
   /id_ed25519$/i,
-  /\.ssh\//i,
-  /\.aws\/credentials/i,
+  /\.ssh[\\/]/i,
+  /\.aws[\\/]credentials/i,
   /\.gnupg/i,
-  /\.docker\/config\.json/i,
+  /\.docker[\\/]config\.json/i,
   /token/i,
   /secret/i,
   /credential/i,
@@ -56,14 +58,32 @@ const SYSTEM_MOD_PATTERNS = [
 ];
 
 /**
+ * Expand leading ~/ or ~\ to the user's home directory.
+ */
+function expandTilde(path: string): string {
+  const home = homedir();
+  if (path === "~") {
+    return home;
+  } else if (path.startsWith("~/") || path.startsWith("~\\")) {
+    return home + path.slice(1);
+  }
+  return path;
+}
+
+/**
  * Extract file paths from a bash command.
- * Matches absolute paths (/...) and relative paths with ../ that escape the workspace.
+ * Matches absolute paths (/...), tilde paths (~/...), and relative paths with ../ that escape the workspace.
  */
 function extractPathsFromCommand(cmd: string): string[] {
   const paths: string[] = [];
   // Match absolute paths — / must be at start of string or after whitespace/quote (not after . or word chars)
   const absoluteMatches = cmd.match(/(?:^|(?<=[\s"'`(]))\/[^\s"'`)]+/g);
   if (absoluteMatches) paths.push(...absoluteMatches);
+  // Match tilde paths (~...)
+  const tildeMatches = cmd.match(/~\\?[^\s"'`)]+/g);
+  if (tildeMatches) {
+    paths.push(...tildeMatches.map(expandTilde));
+  }
   // Match relative paths with ../ (potential workspace escape)
   const relativeMatches = cmd.match(/\.\.\/[^\s"'`)]+/g);
   if (relativeMatches) paths.push(...relativeMatches);
@@ -71,12 +91,30 @@ function extractPathsFromCommand(cmd: string): string[] {
 }
 
 /**
+ * Normalize a path for consistent comparison across platforms.
+ * - Uses platform-native separator
+ * - Lowercases on Windows (case-insensitive filesystem)
+ */
+function normalizePath(path: string): string {
+  const normalized = toNamespacedPath(path);
+  return platform() === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+/**
+ * Check if a path is inside the workspace.
+ */
+function isInsideWorkspace(path: string, cwd: string): boolean {
+  const normPath = normalizePath(path);
+  const normCwd = normalizePath(cwd);
+  return normPath === normCwd || normPath.startsWith(normCwd + sep);
+}
+
+/**
  * Check if any path in the command escapes the workspace.
  */
 function hasPathsOutsideWorkspace(cmd: string, cwd: string): boolean {
   const paths = extractPathsFromCommand(cmd);
-  const cwdNormalized = toNamespacedPath(cwd);
-  
+
   for (const path of paths) {
     const absolute = resolve(cwd, path);
     let real: string;
@@ -85,12 +123,12 @@ function hasPathsOutsideWorkspace(cmd: string, cwd: string): boolean {
     } catch {
       real = absolute;
     }
-    const normalized = toNamespacedPath(real);
-    
+
     // Allow /dev/* device files (e.g., /dev/null, /dev/zero)
+    const normalized = toNamespacedPath(real);
     if (normalized === "/dev" || normalized.startsWith("/dev/")) continue;
-    
-    if (!normalized.startsWith(cwdNormalized + "/") && normalized !== cwdNormalized) {
+
+    if (!isInsideWorkspace(real, cwd)) {
       return true;
     }
   }
@@ -174,8 +212,11 @@ export default function (pi: ExtensionAPI) {
 
     if (!targetPath) return;
 
+    // Expand ~ before resolving
+    const expandedTarget = expandTilde(targetPath);
+
     // Resolve relative paths against cwd, then follow symlinks
-    const absolute = resolve(ctx.cwd, targetPath);
+    const absolute = resolve(ctx.cwd, expandedTarget);
     let real: string;
     try {
       real = realpathSync(absolute);
@@ -183,9 +224,8 @@ export default function (pi: ExtensionAPI) {
       real = absolute; // File doesn't exist yet (e.g. write) — use resolved path
     }
 
-    // Normalize for Windows
+    // Normalize for consistent comparison
     const normalized = toNamespacedPath(real);
-    const cwdNormalized = toNamespacedPath(ctx.cwd);
 
     // Sensitive files — always prompt, even inside workspace
     if (SENSITIVE_PATTERNS.some(re => re.test(normalized))) {
@@ -198,7 +238,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     // Inside workspace — allow silently
-    if (normalized.startsWith(cwdNormalized + "/") || normalized === cwdNormalized) return;
+    if (isInsideWorkspace(real, ctx.cwd)) return;
 
     // Outside workspace — ask for permission
     const allowed = await ctx.ui.confirm(
