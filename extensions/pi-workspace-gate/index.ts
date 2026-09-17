@@ -1,8 +1,8 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
-import { resolve, toNamespacedPath, sep } from "node:path";
+import { resolve, toNamespacedPath, sep, join } from "node:path";
 import { realpathSync } from "node:fs";
-import { platform, homedir } from "node:os";
+import { platform, homedir, tmpdir } from "node:os";
 
 const FILE_TOOLS = ["read", "write", "edit", "grep", "find", "ls"] as const;
 
@@ -110,6 +110,108 @@ function isInsideWorkspace(path: string, cwd: string): boolean {
 }
 
 /**
+ * Directories treated as disposable scratch space.
+ *
+ * pi writes here constantly — truncated bash output (`pi-bash-*.log`), the
+ * external-editor buffer (`pi-editor-*`), share staging (`pi-share-*`),
+ * clipboard images and TUI crash logs. Gating those paths makes the extension
+ * prompt on almost every turn, so they are allowed silently.
+ *
+ * Note pi uses `os.tmpdir()`, which on macOS is `/var/folders/…/T` (NOT `/tmp`).
+ * Literal `/tmp` and `/var/tmp` are included as well, plus the `$TMPDIR`/`$TMP`/
+ * `$TEMP` overrides, so the allowlist matches both what pi does and what users
+ * typically type.
+ */
+let tempRootsCache: string[] | null = null;
+
+/** Strip a trailing separator so `root + sep` comparisons stay clean. */
+function stripTrailingSep(path: string): string {
+  return path.length > 1 && (path.endsWith(sep) || path.endsWith("/"))
+    ? path.slice(0, -1)
+    : path;
+}
+
+/**
+ * Expand one candidate temp root into the forms it should be matched against:
+ * the literal resolved path *and* its symlink target. On macOS `/tmp` is a
+ * symlink to `/private/tmp`, and `os.tmpdir()` returns `/var/folders/…/T`
+ * whose real path is `/private/var/folders/…/T` — both forms are needed
+ * because a path that does not exist yet cannot be realpath'd by the caller.
+ */
+function tempRootVariants(candidate: string | undefined): string[] {
+  if (!candidate) return [];
+  let absolute: string;
+  try {
+    absolute = resolve(expandTilde(candidate));
+  } catch {
+    return [];
+  }
+  const variants = [stripTrailingSep(normalizePath(absolute))];
+  try {
+    const real = realpathSync(absolute);
+    if (real !== absolute) variants.push(stripTrailingSep(normalizePath(real)));
+  } catch {
+    // Root doesn't exist yet — the literal form is enough.
+  }
+  return variants;
+}
+
+function getTempRoots(): string[] {
+  if (tempRootsCache) return tempRootsCache;
+
+  const candidates: (string | undefined)[] = [
+    tmpdir(),
+    process.env.TMPDIR,
+    process.env.TMP,
+    process.env.TEMP,
+  ];
+  if (platform() === "win32") {
+    candidates.push(
+      process.env.SYSTEMROOT ? join(process.env.SYSTEMROOT, "Temp") : "C:\\Windows\\Temp",
+    );
+  } else {
+    candidates.push("/tmp", "/var/tmp");
+  }
+
+  const roots = new Set<string>();
+  for (const candidate of candidates) {
+    for (const variant of tempRootVariants(candidate)) {
+      if (variant) roots.add(variant);
+    }
+  }
+  tempRootsCache = [...roots];
+  return tempRootsCache;
+}
+
+/** Check a resolved path against the temp roots (symlinks already followed). */
+function isInsideTempDir(path: string): boolean {
+  const normalized = stripTrailingSep(normalizePath(path));
+  for (const root of getTempRoots()) {
+    if (normalized === root || normalized.startsWith(root + sep)) return true;
+  }
+  return false;
+}
+
+/**
+ * True when a path is disposable scratch space: a `/dev/*` device file or
+ * anything under a temp root.
+ *
+ * Both the unresolved and symlink-resolved forms are tested so that writing a
+ * brand-new file into `/tmp` still matches (realpathSync falls back to the
+ * unresolved path when the target does not exist yet). A symlink *inside* a
+ * temp dir that points elsewhere still resolves outside the roots and is
+ * therefore not treated as scratch — no symlink bypass.
+ */
+function isScratchPath(absolute: string, real: string): boolean {
+  for (const candidate of [absolute, real]) {
+    const normalized = toNamespacedPath(candidate);
+    if (normalized === "/dev" || normalized.startsWith("/dev/")) return true;
+    if (isInsideTempDir(candidate)) return true;
+  }
+  return false;
+}
+
+/**
  * Check if any path in the command escapes the workspace.
  */
 function hasPathsOutsideWorkspace(cmd: string, cwd: string): boolean {
@@ -124,9 +226,8 @@ function hasPathsOutsideWorkspace(cmd: string, cwd: string): boolean {
       real = absolute;
     }
 
-    // Allow /dev/* device files (e.g., /dev/null, /dev/zero)
-    const normalized = toNamespacedPath(real);
-    if (normalized === "/dev" || normalized.startsWith("/dev/")) continue;
+    // Allow /dev/* device files and temp dirs (pi writes there constantly)
+    if (isScratchPath(absolute, real)) continue;
 
     if (!isInsideWorkspace(real, cwd)) {
       return true;
@@ -227,7 +328,7 @@ export default function (pi: ExtensionAPI) {
     // Normalize for consistent comparison
     const normalized = toNamespacedPath(real);
 
-    // Sensitive files — always prompt, even inside workspace
+    // Sensitive files — always prompt, even inside workspace or a temp dir
     if (SENSITIVE_PATTERNS.some(re => re.test(normalized))) {
       const allowed = await ctx.ui.confirm(
         "Sensitive file",
@@ -236,6 +337,9 @@ export default function (pi: ExtensionAPI) {
       if (!allowed) return { block: true, reason: "Blocked by user — sensitive file" };
       return;
     }
+
+    // Disposable scratch space (/tmp, /var/tmp, os.tmpdir()) — allow silently
+    if (isScratchPath(absolute, real)) return;
 
     // Inside workspace — allow silently
     if (isInsideWorkspace(real, ctx.cwd)) return;
