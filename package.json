@@ -6,7 +6,8 @@
     "pi-package"
   ],
   "scripts": {
-    "test": "pi -ne -ns -e ./extensions/pi-workspace-gate"
+    "test": "node test/run.mjs",
+    "test:load": "pi -ne -ns -e ./extensions/pi-workspace-gate"
   },
   "license": "MIT",
   "repository": {

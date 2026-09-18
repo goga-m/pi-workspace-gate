@@ -2,14 +2,16 @@
 
 A security extension for [pi](https://github.com/mariozechner/pi-coding-agent) that intercepts tool calls and prompts for user confirmation before allowing potentially dangerous operations.
 
+Both shell tools are gated — `bash` **and** `powershell` — so swapping one for the other (pi's own recommendation on Windows) does not bypass the gate.
+
 ## What It Guards
 
 | Category | Examples |
 |----------|----------|
-| 🔴 **Dangerous commands** | `rm -rf`, `sudo`, `mkfs`, `dd if=`, `chmod 777` |
-| 📦 **Package installs** | `npm install`, `yarn add`, `pip install`, `cargo install` |
-| 🖥️ **System modifications** | `apt install`, `brew install`, `yum install`, `dnf install` |
-| 📋 **File copies** | `cp`, `scp`, `rsync` |
+| 🔴 **Dangerous commands** | `rm -rf`, `sudo`, `mkfs`, `dd if=`, `chmod 777`, `Remove-Item -Recurse -Force`, `Format-Volume`, `Invoke-Expression` |
+| 📦 **Package installs** | `npm install`, `yarn add`, `pip install`, `cargo install`, `winget install`, `choco install`, `Install-Module` |
+| 🖥️ **System modifications** | `apt install`, `brew install`, `yum install`, `dnf install`, `Set-ExecutionPolicy`, `reg add` |
+| 📋 **File copies** | `cp`, `scp`, `rsync`, `Copy-Item` |
 | 🚪 **Paths outside workspace** | Any command or file tool targeting paths outside the CWD (except [scratch directories](#scratch-directories)) |
 | 🔑 **Sensitive files** | `.env`, `.npmrc`, SSH keys, tokens, `.pem`, `.key` |
 
@@ -39,7 +41,8 @@ Auto-allowed roots:
 | `$TMP`, `$TEMP` | whatever you set |
 | `/tmp`, `/var/tmp` | including their macOS `/private/…` symlink targets |
 | `%SYSTEMROOT%\Temp` | `C:\Windows\Temp` |
-| `/dev/*` | `/dev/null`, `/dev/zero` |
+| `/dev/*` | `/dev/null`, `/dev/zero` — also in Git Bash form, where `2>/dev/null` would otherwise resolve to `C:\dev\null` |
+| `/tmp` under Git Bash | rewritten to `%TEMP%`, which is where Git Bash's `/etc/fstab` actually mounts it |
 
 The allowlist covers the **path** checks only. Everything else still prompts, even when the paths are in `/tmp`:
 
@@ -66,14 +69,50 @@ The following patterns always trigger a confirmation prompt, even inside the wor
 - Files containing `token`, `secret`, `credential`
 - `.key`, `.pem`
 
+These apply to shell commands too, not just the file tools — otherwise `cat .env`
+would slip past a gate that `read .env` triggers. Path-like command tokens are
+matched with the same patterns the file tools use; bare tokens are matched
+against a narrower basename list, so `cat .env` prompts while
+`echo "the secret plan"` does not.
+
+## Windows
+
+pi uses **Git Bash** by default on Windows, so the model emits MSYS paths such
+as `/c/Users/you/project/src/index.ts`. Node's `path.win32.resolve` treats a
+leading `/` as drive-relative and rewrites that to
+`C:\c\Users\you\project\src\index.ts` — the drive letter becomes a directory.
+Left alone, every MSYS path looks external, so in-workspace edits prompt and
+`%TEMP%` never matches the scratch allowlist.
+
+The extension rewrites `/c/…` and `/cygdrive/c/…` back to `C:\…` before
+resolving, on Windows only (on POSIX hosts `/c/…` is a genuine absolute path).
+
+Paths written in native form are extracted from shell commands as well:
+`C:\Users\you\x`, `c:/Users/you/x`, `..\..\x` and UNC `\\server\share`. Without
+this, `cat C:\Users\you\Desktop\notes.txt` was invisible to the path check.
+
 ## How It Works
 
 The extension subscribes to pi's `tool_call` event and checks:
 
-1. **Bash commands** against dangerous patterns (rm, sudo, installs, etc.)
+1. **Shell commands** (`bash` and `powershell`) against dangerous patterns (rm, sudo, installs, etc.)
 2. **File tool paths** against the workspace boundary and sensitive file patterns
 3. **Symlinks** are resolved — no bypassing via symlink tricks
 4. **Scratch paths** (`/tmp`, `/var/tmp`, `os.tmpdir()`, `/dev/*`) skip the workspace-boundary check — see [Scratch directories](#scratch-directories)
+5. **Shell paths** are extracted in POSIX, MSYS, drive-letter and UNC forms before the boundary check
+
+## Testing
+
+```bash
+npm test            # both platforms
+npm test -- win     # simulated win32 only
+npm run test:load   # load the extension in a real pi session
+```
+
+`test/run.mjs` needs no dependencies: pi is stubbed (`test/pi-stub.mjs`) and
+win32 `path` is shimmed via `module.registerHooks` (`test/win32-path.mjs`),
+since `node:path` picks its implementation at process boot and cannot be faked
+by overriding `process.platform` alone. Requires Node >= 22.15.
 
 For anything that matches a pattern, a confirmation dialog appears. Deny it and the call is blocked.
 
