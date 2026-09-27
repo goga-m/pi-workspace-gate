@@ -445,8 +445,57 @@ async function gateShellCommand(
   return undefined;
 }
 
+/**
+ * Session-scoped enable flag for the whole gate.
+ *
+ * Defaults to enabled and is reset on every `session_start`, so a session
+ * where the user ran `/workspace-gate off` never leaks its disabled state
+ * into the next session — in-process session switches included.
+ */
+let gateEnabled = true;
+
 export default function (pi: ExtensionAPI) {
+  pi.on("session_start", async () => {
+    gateEnabled = true;
+  });
+
+  pi.registerCommand("workspace-gate", {
+    description: "Enable/disable the workspace gate for this session: /workspace-gate [on|off|status]",
+    handler: async (args, ctx) => {
+      const arg = args.trim().toLowerCase();
+
+      if (arg === "on" || arg === "off") {
+        gateEnabled = arg === "on";
+      } else if (arg === "") {
+        gateEnabled = !gateEnabled;
+      } else if (arg !== "status") {
+        ctx.ui.notify(
+          `workspace-gate: unknown argument "${arg}". Usage: /workspace-gate [on|off|status]`,
+          "warning",
+        );
+        return;
+      }
+
+      if (arg === "status") {
+        ctx.ui.notify(
+          `workspace-gate: ${gateEnabled ? "enabled" : "DISABLED — tool calls are not being checked"}`,
+          gateEnabled ? "info" : "warning",
+        );
+      } else {
+        ctx.ui.notify(
+          gateEnabled
+            ? "workspace-gate: enabled"
+            : "workspace-gate: DISABLED — tool calls are not being checked until you re-enable or start a new session",
+          gateEnabled ? "info" : "warning",
+        );
+      }
+    },
+  });
+
   pi.on("tool_call", async (event, ctx) => {
+    // Gate disabled for this session via /workspace-gate off — allow everything.
+    if (!gateEnabled) return;
+
     const toolName = event.toolName;
 
     // --- Shell tools: gate dangerous commands ---
