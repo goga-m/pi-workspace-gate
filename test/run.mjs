@@ -64,7 +64,17 @@ registerHooks({
 const { default: extension } = await import(EXTENSION.href);
 
 let handler = null;
-extension({ on: (event, h) => { if (event === "tool_call") handler = h; } });
+let sessionStartHandler = null;
+let commandHandler = null;
+extension({
+  on: (event, h) => {
+    if (event === "tool_call") handler = h;
+    else if (event === "session_start") sessionStartHandler = h;
+  },
+  registerCommand: (name, options) => {
+    if (name === "workspace-gate") commandHandler = options.handler;
+  },
+});
 
 const CWD = MODE === "win" ? "C:\\Users\\testuser\\Projects\\app" : "/Users/testuser/Projects/app";
 
@@ -145,21 +155,35 @@ if (MODE === "win") {
 
 let pass = 0;
 let fail = 0;
-for (const c of cases) {
+
+async function check(c) {
   const prompts = [];
+  const notices = [];
   const ctx = {
     cwd: CWD,
     // Deny everything so every prompt is observable as a block.
-    ui: { confirm: async (title) => { prompts.push(title); return false; } },
+    ui: {
+      confirm: async (title) => { prompts.push(title); return false; },
+      notify: (msg) => { notices.push(msg); },
+    },
   };
 
   let result;
   try {
-    result = await handler({ toolName: c.tool, input: c.input }, ctx);
+    if (c.command !== undefined) await commandHandler(c.command, ctx);
+    else result = await handler({ toolName: c.tool, input: c.input }, ctx);
   } catch (err) {
     console.log(`ERROR  ${c.tool} ${JSON.stringify(c.input)} -> ${err.stack}`);
     fail++;
-    continue;
+    return;
+  }
+
+  if (c.command !== undefined) {
+    const ok = c.expect === "notify" ? notices.length > 0 : true;
+    const got = notices.length ? `notify[${notices.join(",")}]` : "no-notify";
+    if (ok) pass++; else fail++;
+    console.log(`${ok ? "ok  " : "FAIL"} ${got.padEnd(34)} /workspace-gate ${c.command} — ${c.why}`);
+    return;
   }
 
   const ok = c.expect === "allow" ? prompts.length === 0 : prompts.length > 0;
@@ -171,6 +195,31 @@ for (const c of cases) {
     `${JSON.stringify(c.input.command ?? c.input.path).padEnd(60)} ${c.why}`
   );
 }
+
+for (const c of cases) await check(c);
+
+// --- /workspace-gate on|off|status (session-scoped) ---
+// `cat .env` prompts in both modes, so it is the canary for gate state.
+const envCanary = { tool: "bash", input: { command: "cat .env" }, expect: "prompt", why: "gate on: .env still prompts" };
+const envAllowed = { tool: "bash", input: { command: "cat .env" }, expect: "allow", why: "gate off: nothing prompts" };
+
+await check({ command: "status", expect: "notify", why: "status reports enabled" });
+await check(envCanary);
+await check({ command: "off", expect: "notify", why: "off reports disabled" });
+await check(envAllowed);
+await check({ tool: "read", input: { path: "/etc/passwd" }, expect: "allow", why: "file tools off too" });
+await check({ command: "status", expect: "notify", why: "status reports disabled" });
+await check({ command: "on", expect: "notify", why: "on re-enables" });
+await check(envCanary);
+await check({ command: "", expect: "notify", why: "bare command toggles off" });
+await check(envAllowed);
+await check({ command: "", expect: "notify", why: "bare command toggles back on" });
+await check(envCanary);
+await check({ command: "bogus", expect: "notify", why: "bad arg warns" });
+await check(envCanary); // bad arg must not change gate state
+await check({ command: "off", expect: "notify", why: "disable before session switch" });
+await sessionStartHandler({}, { cwd: CWD, ui: { confirm: async () => false, notify: () => {} } });
+await check({ ...envCanary, why: "new session resets the gate to enabled" });
 
 console.log(`\n${MODE}: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

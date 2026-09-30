@@ -29,6 +29,17 @@ pi -e /path/to/Workspace-Gate
 
 No configuration needed — it works out of the box. The extension uses pattern matching to detect potentially dangerous operations and prompts you before allowing them.
 
+### Turning the gate off
+
+```bash
+/workspace-gate        # toggle
+/workspace-gate off    # disable for this session
+/workspace-gate on     # re-enable
+/workspace-gate status # report current state
+```
+
+The gate starts **enabled** in every session. `off` silences all checks for the rest of the session — every tool call passes without prompting — and the switch is **never persisted**: a new session (or restarting pi) always starts gated again.
+
 ### Scratch directories
 
 Temp directories are **never** gated for path checks. pi writes there constantly — truncated bash output (`pi-bash-*.log`), the external-editor buffer (`pi-editor-*`), share staging (`pi-share-*`) and clipboard images — so prompting on those paths would mean a confirmation on nearly every turn.
